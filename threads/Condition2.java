@@ -23,10 +23,11 @@ public class Condition2 {
      *				<tt>wake()</tt>, or <tt>wakeAll()</tt>.
      */
     public Condition2(Lock conditionLock) {
-		this.conditionLock = conditionLock;
-		
-		// Condition2 constraint: no semaphores -> using KThread
-		readyQueue = new LinkedList<KThread>();
+        this.conditionLock = conditionLock;
+        
+        // Condition2 constraint: no semaphores -> using LinkedList/KThread
+        //initialized in KThread
+        readyQueue = new LinkedList<KThread>(); 
     }
 
     /**
@@ -41,10 +42,10 @@ public class Condition2 {
         // interrupt disabled with lock
         boolean intStatus = Machine.interrupt().disable();
         
-        // releasing the lock
+        // lock released
         conditionLock.release();
         
-        // currentThread added to waitQueue
+        // currentThread added to readyQueue (consists of waiting threads)
         readyQueue.add(KThread.currentThread());
         
         // currentThread goes to sleep
@@ -55,6 +56,8 @@ public class Condition2 {
         
         // interrupt enabled
         Machine.interrupt().restore(intStatus);
+	
+	
     }
 
     /**
@@ -67,25 +70,29 @@ public class Condition2 {
         // interrupt disabled with lock
         boolean intStatus = Machine.interrupt().disable();
         
-        // checks if waitQueue is not empty
+        // check if readyQueue is not empty
         if(!readyQueue.isEmpty()) {	
-            // remove first thread from waitQueue and add to readyQueue
+            
+            // remove first thread from readyQueue and add to the end of threads to be implemented
             ((KThread) readyQueue.removeFirst()).ready();
+            
         }
+	
 		// interrupt re-enabled
-		Machine.interrupt().restore(intStatus);		
-}
+		Machine.interrupt().restore(intStatus);
+		
+    }
 
     /**
      * Wake up all threads sleeping on this condition variable. The current
      * thread must hold the associated lock.
      */
     public void wakeAll() {
-		Lib.assertTrue(conditionLock.isHeldByCurrentThread());
-	    // wake up everybody in readyQueue
-	    while(!readyQueue.isEmpty()) {
-	    	wake();
-        }
+        Lib.assertTrue(conditionLock.isHeldByCurrentThread());
+            
+        // adapted from Condition.java which does not use semaphores
+        while(!readyQueue.isEmpty()) 
+            wake();
     }
     
     private Lock conditionLock;
