@@ -5,6 +5,8 @@ import nachos.threads.*;
 import nachos.userprog.*;
 
 import java.io.EOFException;
+import java.util.HashMap;
+import java.util.LinkedList;
 
 /**
  * Encapsulates the state of a user process that is not contained in its
@@ -23,10 +25,22 @@ public class UserProcess {
      * Allocate a new process.
      */
     public UserProcess() {
-	int numPhysPages = Machine.processor().getNumPhysPages();
-	pageTable = new TranslationEntry[numPhysPages];
-	for (int i=0; i<numPhysPages; i++)
-	    pageTable[i] = new TranslationEntry(i,i, true,false,false,false);
+        int numPhysPages = Machine.processor().getNumPhysPages();
+        pageTable = new TranslationEntry[numPhysPages];
+        for (int i=0; i<numPhysPages; i++) {
+            pageTable[i] = new TranslationEntry(i,i, true,false,false,false);
+        }
+        // Initialize stdin and stdout
+        fileNames[fdStandardInput] = "stdin";
+        files[fdStandardInput] = UserKernel.console.openForReading();
+    
+        fileNames[fdStandardOutput] = "stdout";
+        files[fdStandardOutput] = UserKernel.console.openForWriting();    
+        
+        childProcesses = new LinkedList<UserProcess>();
+		parentProcess = null; // parentProcesses
+		exitStatuses = new HashMap<Integer,Integer>();
+		mapLock = new Lock();
     }
     
     /**
@@ -37,7 +51,7 @@ public class UserProcess {
      * @return	a new process of the correct class.
      */
     public static UserProcess newUserProcess() {
-	return (UserProcess)Lib.constructObject(Machine.getProcessClassName());
+	    return (UserProcess)Lib.constructObject(Machine.getProcessClassName());
     }
 
     /**
@@ -127,20 +141,66 @@ public class UserProcess {
      *			the array.
      * @return	the number of bytes successfully transferred.
      */
-    public int readVirtualMemory(int vaddr, byte[] data, int offset,
-				 int length) {
-	Lib.assertTrue(offset >= 0 && length >= 0 && offset+length <= data.length);
+    public int readVirtualMemory(int vaddr, byte[] data, int offset, int length) {
+        Lib.assertTrue(offset >= 0 && length >= 0 && offset+length <= data.length);
+        int end = vaddr + length;
+        if(length > Machine.processor().makeAddress(numPages-1, pageSize-1)- vaddr){
+            length = Machine.processor().makeAddress(numPages-1, pageSize-1)- vaddr;
+        }
 
-	byte[] memory = Machine.processor().getMemory();
-	
-	// for now, just assume that virtual addresses equal physical addresses
-	if (vaddr < 0 || vaddr >= memory.length)
-	    return 0;
+        if(vaddr < 0){
+            vaddr = 0;
+        }
+        
 
-	int amount = Math.min(length, memory.length-vaddr);
-	System.arraycopy(memory, vaddr, data, offset, amount);
+        byte[] memory = Machine.processor().getMemory();
+        
+        int fvpage = Machine.processor().pageFromAddress(vaddr);
+        int lvpage = Machine.processor().pageFromAddress(end);
+        
+        
 
-	return amount;
+        int bytesTrans = 0;
+
+        for(int i = fvpage; i <= lvpage;i++){
+            if(!pageTable[i].valid){
+                return bytesTrans;
+            }
+
+            int voffset = 0;
+            int poffset = pageSize - 1;
+
+            int fvaddress = Machine.processor().makeAddress(i, 0);
+            int lvaddress = Machine.processor().makeAddress(i, pageSize - 1);
+            
+            // the first page
+            if(vaddr > fvpage && end >= lvaddress){
+                voffset = vaddr - fvaddress;
+            }
+            // the middle page
+            else if(vaddr <= fvaddress && end >= lvaddress){
+                // keep defaults 
+            }
+            // the last page 
+            else if(vaddr <= fvaddress && end < lvaddress){
+                poffset = end - fvaddress;
+            }
+            //special case
+            else{
+                voffset = vaddr - fvaddress;
+                poffset = end - fvaddress;
+            }
+
+            int fpaddress = Machine.processor().makeAddress(pageTable[i].ppn, voffset);
+            System.arraycopy(memory, fpaddress, data, offset+bytesTrans, poffset-voffset);
+
+            bytesTrans += (poffset-voffset);
+            pageTable[i].used = true;
+
+        }
+
+        return bytesTrans;
+
     }
 
     /**
@@ -170,20 +230,68 @@ public class UserProcess {
      *			virtual memory.
      * @return	the number of bytes successfully transferred.
      */
-    public int writeVirtualMemory(int vaddr, byte[] data, int offset,
-				  int length) {
-	Lib.assertTrue(offset >= 0 && length >= 0 && offset+length <= data.length);
-
-	byte[] memory = Machine.processor().getMemory();
+    public int writeVirtualMemory(int vaddr, byte[] data, int offset,int length) {
+		Lib.assertTrue(offset >= 0 && length >= 0 && offset+length <= data.length);
 	
-	// for now, just assume that virtual addresses equal physical addresses
-	if (vaddr < 0 || vaddr >= memory.length)
-	    return 0;
+		byte[] memory = Machine.processor().getMemory();
+		
+	    int end = vaddr + length;
+	
+	    if(length > Machine.processor().makeAddress(numPages-1, pageSize-1)- vaddr){
+	        length = Machine.processor().makeAddress(numPages-1, pageSize-1)- vaddr;
+	    }
+	
+	    if(vaddr < 0){
+	        vaddr = 0;
+	    }
+	    
+	    int fvpage = Machine.processor().pageFromAddress(vaddr);
+	    int lvpage = Machine.processor().pageFromAddress(end);
+	    
+	    
+	
+	    int bytesTrans = 0;
+	
+	    for(int i = fvpage; i <= lvpage;i++){
+	        if(!pageTable[i].valid || pageTable[i].readOnly){
+	            return bytesTrans;
+	        }
+	
+	        int voffset = 0;
+	        int poffset = pageSize - 1;
+	
+	        int fvaddress = Machine.processor().makeAddress(i, 0);
+	        int lvaddress = Machine.processor().makeAddress(i, pageSize - 1);
+	        
+	        // the first page
+	        if(vaddr > fvpage && end >= lvaddress){
+	            voffset = vaddr - fvaddress;
+	        }
+	        // the middle page
+	        else if(vaddr <= fvaddress && end >= lvaddress){
+	            // keep defaults 
+	        }
+	        // the last page 
+	        else if(vaddr <= fvaddress && end < lvaddress){
+	            poffset = end - fvaddress;
+	        }
+	        //special case
+	        else{
+	            voffset = vaddr - fvaddress;
+	            poffset = end - fvaddress;
+	        }
 
-	int amount = Math.min(length, memory.length-vaddr);
-	System.arraycopy(data, offset, memory, vaddr, amount);
+	        int fpaddress = Machine.processor().makeAddress(pageTable[i].ppn, voffset);
+	        System.arraycopy(data, offset+bytesTrans, memory, fpaddress, poffset - voffset);
+	
+	        bytesTrans += (poffset-voffset);
+	        pageTable[i].used = true;
+	        pageTable[i].dirty = true;
 
-	return amount;
+	    }
+
+	    return bytesTrans;
+
     }
 
     /**
@@ -252,7 +360,7 @@ public class UserProcess {
 
 	if (!loadSections())
 	    return false;
-
+ 
 	// store arguments in last page
 	int entryOffset = (numPages-1)*pageSize;
 	int stringOffset = entryOffset + args.length*4;
@@ -298,8 +406,7 @@ public class UserProcess {
 	    for (int i=0; i<section.getLength(); i++) {
 		int vpn = section.getFirstVPN()+i;
 
-		// for now, just assume virtual addresses=physical addresses
-		section.loadPage(i, vpn);
+		section.loadPage(i, pageTable[vpn].ppn);
 	    }
 	}
 	
@@ -310,7 +417,20 @@ public class UserProcess {
      * Release any resources allocated by <tt>loadSections()</tt>.
      */
     protected void unloadSections() {
-    }    
+		UserKernel.lock.acquire();
+		//deallocate physical pages
+		for (int i=0; i < numPages; i++) {
+			UserKernel.freePages.add(pageTable[i].ppn);
+		}
+		UserKernel.lock.release();
+
+		for (int i=0; i < MAX_FD; i++) {
+			if (files[i] != null) {
+				files[i].close();
+			}
+		}	
+		coff.close();  
+    }      
 
     /**
      * Initialize the processor's registers in preparation for running the
@@ -323,7 +443,7 @@ public class UserProcess {
 	Processor processor = Machine.processor();
 
 	// by default, everything's 0
-	for (int i=0; i<processor.numUserRegisters; i++)
+	for (int i = 0; i < processor.numUserRegisters; i++)
 	    processor.writeRegister(i, 0);
 
 	// initialize PC and SP according
@@ -333,6 +453,15 @@ public class UserProcess {
 	// initialize the first two argument registers to argc and argv
 	processor.writeRegister(Processor.regA0, argc);
 	processor.writeRegister(Processor.regA1, argv);
+    }
+
+    public int getNextFileDescriptor() {
+        for (int i = 2; i < MAX_FD; i++) {
+            if (files[i] == null) {
+                return i;
+            }
+        }
+        return -1;
     }
 
     /**
@@ -345,10 +474,203 @@ public class UserProcess {
 	Lib.assertNotReached("Machine.halt() did not halt machine!");
 	return 0;
     }
+ 
+    private int handleCreate(int a0) {
+        String fileName = readVirtualMemoryString(a0, MAX_STRING_LEN);
+        OpenFile file = UserKernel.fileSystem.open(fileName, true);
 
+        if (file != null) {
+            int fd = getNextFileDescriptor();
+            if (fd != -1) {
+                files[fd] = file;
+                fileNames[fd] = fileName;
+                fileOffsets[fd] = 0;
+                return fd;
+            } else {
+                return -1;
+            }
+        }
+        
+        return -1;
+    }
+
+    private int handleOpen(int a0) {
+        String fileName = readVirtualMemoryString(a0, MAX_STRING_LEN);
+        OpenFile file = UserKernel.fileSystem.open(fileName, false);
+
+        if (file != null) {
+            int fd = getNextFileDescriptor();
+            if (fd != -1) {
+                files[fd] = file;
+                fileNames[fd] = fileName;
+                fileOffsets[fd] = 0;
+                return fd;
+            } else {
+                return -1;
+            }
+        }
+
+        return -1;
+    }
+
+    private int handleRead(int fd, int address, int size) {
+        // Check for invalid argument
+        if (fd < 0 || fd >= MAX_FD || files[fd] == null || size < 0) {
+            return -1;
+        }
+
+        byte buffer[] = new byte[size];
+
+        OpenFile currentFile = files[fd];
+        int bytesRead = currentFile.read(buffer, 0, size);
+
+        if (bytesRead != -1) {
+            writeVirtualMemory(address, buffer, 0, bytesRead);
+            fileOffsets[fd] += bytesRead;
+            return bytesRead;
+        }
+
+        return -1;
+    }
+
+    private int handleWrite(int fd, int address, int size) {
+        // Check for invalid argument
+        if (fd < 0 || fd >= MAX_FD || files[fd] == null || size < 0) {
+            return -1;
+        }
+
+        byte buffer[] = new byte[size];
+
+        OpenFile currentFile = files[fd];
+        int bytesWritten = currentFile.write(fileOffsets[fd], buffer, 0, size);
+
+        readVirtualMemory(address, buffer);
+        fileOffsets[fd] += bytesWritten;
+
+        if (bytesWritten == size) {
+            return bytesWritten;
+        }
+
+        return -1;
+    }
+
+    private int handleClose(int fd) {
+        // Check for invalid argument
+        if (fd < 0 || fd >= MAX_FD || files[fd] == null) {
+            return -1;
+        }
+    
+        files[fd].close();
+        files[fd] = null;
+        
+        return 0;
+    }
+
+    private int handleUnlink(int a0) {
+        String fileName = readVirtualMemoryString(a0, MAX_STRING_LEN);
+
+        int fd = -1;
+        for (int i = 0; i < MAX_FD; i++) {
+            if (fileNames[i] == fileName) {
+                fd = i;
+                break;
+            }
+        }
+        boolean success = true;
+        if (fd == -1) {
+            success = UserKernel.fileSystem.remove(fileName);
+        }  
+        return success ? 0 : -1;
+    }
+
+    private int handleExit(int stat) { // status
+
+        coff.close();
+        if (parentProcess != null) {
+            parentProcess.mapLock.acquire();
+            parentProcess.exitStatuses.put(pid, stat);
+            parentProcess.mapLock.release();
+            parentProcess.childProcesses.remove(this);
+        }
+        unloadSections();
+        if (pid == 0) {
+            Kernel.kernel.terminate(); //root exiting
+        } else {
+            UThread.finish();
+        }
+        return stat;
+    }
+
+    private int handleJoin(int pid, int saddr) { //
+        UserProcess cprocess = null;
+
+        // process matching with its pid
+        for (int i = 0; i < childProcesses.size(); i++) {
+            if(pid == childProcesses.get(i).pid) {
+                cprocess = childProcesses.get(i);
+                break;
+            }
+        }
+
+        // pid does not match child
+        if(cprocess == null) {
+            return -1;
+        }
+
+        cprocess.thread.join();
+        mapLock.acquire();
+        Integer stat = exitStatuses.get(cprocess.pid);
+        mapLock.release();
+
+        byte[] cstat = new byte[4];
+        Lib.bytesFromInt(cstat, 0, stat);
+        int numWrittenBytes = writeVirtualMemory(saddr, cstat); // (statusAddress, childStatus)
+        if (numWrittenBytes != 4) {
+            return 0; // child not exited
+        } else {
+            return 1; // child exited
+        }	
+    }
+
+    private int handleExec(int filenameaddr, int argc, int argAddress) {
+	
+		String filename = readVirtualMemoryString(filenameaddr, 256);
+		if (filename == null || filenameaddr < 0) {    // Check string filename
+				return -1;
+		}
+
+		// Check arguments
+		if (argc < 0){
+				return -1;
+		}
+		String[] argument = new String[argc];
+		for (int i=0; i < argc; i++ ) {
+			byte[] argsAddress = new byte[4];
+			int byteRead = readVirtualMemory(argAddress + (i*4), argsAddress);
+			if (byteRead != 4){    	// check argsAddress
+					return -1;
+			}
+			int argvaddr = Lib.bytesToInt(argsAddress, 0);
+			
+			String argum = readVirtualMemoryString(argvaddr, 256);
+			if (argum == null){    // check argum
+					return -1;
+			}
+			argument[i] = argum;
+		}
+
+		UserProcess cprocess = UserProcess.newUserProcess();
+		if (cprocess.execute(filename, argument)){
+			cprocess.parentProcess = this; // parent process
+			this.childProcesses.add(cprocess);
+			return cprocess.pid;
+		} else{
+			return -1;
+		} 	
+    }
 
     private static final int
-        syscallHalt = 0,
+    syscallHalt = 0,
 	syscallExit = 1,
 	syscallExec = 2,
 	syscallJoin = 3,
@@ -388,17 +710,35 @@ public class UserProcess {
      * @return	the value to be returned to the user.
      */
     public int handleSyscall(int syscall, int a0, int a1, int a2, int a3) {
-	switch (syscall) {
-	case syscallHalt:
-	    return handleHalt();
-
-
-	default:
-	    Lib.debug(dbgProcess, "Unknown syscall " + syscall);
-	    Lib.assertNotReached("Unknown system call!");
-	}
-	return 0;
+        switch (syscall) {
+            case syscallHalt:
+                return handleHalt();
+            case syscallExit:
+                return handleExit(a0);
+            case syscallExec:
+                return handleExec(a0, a1, a2);
+            case syscallJoin:
+                return handleJoin(a0, a1);
+            case syscallCreate:
+                return handleCreate(a0);
+            case syscallOpen:
+                return handleOpen(a0);
+            case syscallRead:
+                return handleRead(a0, a1, a2);           
+            case syscallWrite:
+                return handleWrite(a0, a1, a2);
+            case syscallClose:
+                return handleClose(a0);            
+            case syscallUnlink:
+                return handleUnlink(a0);
+            default:
+            Lib.debug(dbgProcess, "Unknown syscall " + syscall);
+            Lib.assertNotReached("Unknown system call!");
+        }
+        return 0;
     }
+
+    
 
     /**
      * Handle a user exception. Called by
@@ -446,4 +786,26 @@ public class UserProcess {
 	
     private static final int pageSize = Processor.pageSize;
     private static final char dbgProcess = 'a';
+
+    //Part 3
+	private LinkedList<UserProcess> childProcesses;
+    private UserProcess parentProcess;
+    HashMap<Integer, Integer> exitStatuses ;
+    Lock mapLock;
+    private int pid;
+    private UThread thread;
+
+    // File descriptors of stdin and stdout
+    private static final int fdStandardInput = 0;
+    private static final int fdStandardOutput = 1;
+
+    /// Index of the 3 arrays act as file descriptors
+    // Array of files
+    private static final int MAX_FD = 16;
+    private static OpenFile files[] = new OpenFile[MAX_FD];
+    // Array of fileNames
+    private static final int MAX_STRING_LEN = 256;
+    private static String fileNames[] = new String[MAX_FD];
+    // Array of fileOffsets
+    private static int fileOffsets[] = new int[MAX_FD];
 }

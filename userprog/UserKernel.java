@@ -4,6 +4,8 @@ import nachos.machine.*;
 import nachos.threads.*;
 import nachos.userprog.*;
 
+import java.util.LinkedList;
+
 /**
  * A kernel that can support multiple user processes.
  */
@@ -59,7 +61,7 @@ public class UserKernel extends ThreadedKernel {
 	    return null;
 	
 	return ((UThread) KThread.currentThread()).process;
-    }
+    }   
 
     /**
      * The exception handler. This handler is called by the processor whenever
@@ -112,4 +114,8 @@ public class UserKernel extends ThreadedKernel {
 
     // dummy variables to make javac smarter
     private static Coff dummy1 = null;
+
+	public static LinkedList<Integer> freePages;
+	
+	public static Lock lock;
 }
